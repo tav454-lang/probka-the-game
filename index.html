@@ -741,6 +741,19 @@ const buzz = ms => { if (save.vib && navigator.vibrate) try { navigator.vibrate(
 const MUSIC = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => 'music/t' + n + '.mp3');
 const MUS = { want: false, idx: -1, gen: 0, gain: null, cur: null, endAt: 0, buf: new Map(), loading: new Map(), timer: 0, urgent: false };
 const MUSIC_VOL = 0.5, XFADE = 2.5;
+// a fresh shuffled order every launch; when it runs out, a new shuffle that
+// never starts with the track that just played
+const MORDER = { list: [], pos: 0 };
+function shuffledTracks(avoid) {
+  const a = MUSIC.map((_, i) => i);
+  for (let k = a.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [a[k], a[j]] = [a[j], a[k]]; }
+  if (a.length > 1 && a[0] === avoid) [a[0], a[1]] = [a[1], a[0]];
+  return a;
+}
+function nextTrack() {
+  if (MORDER.pos >= MORDER.list.length) { MORDER.list = shuffledTracks(MUS.idx); MORDER.pos = 0; }
+  return MORDER.list[MORDER.pos++];
+}
 function loadTrack(i) {
   if (MUS.buf.has(i)) return Promise.resolve(MUS.buf.get(i));
   if (MUS.loading.has(i)) return MUS.loading.get(i);
@@ -767,10 +780,14 @@ function playTrack(i, gen, fadeIn) {
     const old = MUS.cur;
     if (old) { try { old.g.gain.cancelScheduledValues(t); old.g.gain.setValueAtTime(old.g.gain.value || 1, t); old.g.gain.linearRampToValueAtTime(0.0001, t + XFADE); old.src.stop(t + XFADE + 0.1); } catch (e) {} }
     MUS.cur = { src, g }; MUS.idx = i; MUS.endAt = t + buf.duration;
-    setTimeout(() => { if (gen === MUS.gen) loadTrack((i + 1) % MUSIC.length).catch(() => {}); }, 4000);
+    setTimeout(() => {
+      if (gen !== MUS.gen) return;
+      if (MORDER.pos >= MORDER.list.length) { MORDER.list = shuffledTracks(i); MORDER.pos = 0; }
+      loadTrack(MORDER.list[MORDER.pos]).catch(() => {});   // the next one, ready in time
+    }, 4000);
   }).catch(() => {
     // no file (offline before it was saved): try the next one a bit later
-    if (gen === MUS.gen && MUS.want) setTimeout(() => { if (gen === MUS.gen && MUS.want) playTrack((i + 1) % MUSIC.length, gen, 1); }, 3000);
+    if (gen === MUS.gen && MUS.want) setTimeout(() => { if (gen === MUS.gen && MUS.want) playTrack(nextTrack(), gen, 1); }, 3000);
   });
 }
 function musicWatch() {
@@ -778,7 +795,7 @@ function musicWatch() {
   // the context's own clock stops while the game is in the background, so this stays in step
   if (AC.currentTime > MUS.endAt - XFADE - 0.3 && !MUS.next) {
     MUS.next = true;
-    playTrack((MUS.idx + 1) % MUSIC.length, MUS.gen, 0.05);
+    playTrack(nextTrack(), MUS.gen, 0.05);
     setTimeout(() => { MUS.next = false; }, (XFADE + 1) * 1000);
   }
 }
@@ -789,7 +806,7 @@ function startMusic(idx) {
   if (!MUS.gain) { MUS.gain = a.createGain(); MUS.gain.connect(a.destination); }   // recordings skip the sound-effect filter
   MUS.gain.gain.setValueAtTime(MUSIC_VOL, a.currentTime);
   MUS.want = true; MUS.gen++; MUS.next = false;
-  playTrack(((idx % MUSIC.length) + MUSIC.length) % MUSIC.length, MUS.gen, 1.2);
+  playTrack(nextTrack(), MUS.gen, 1.2);   // carries on through the shuffle after a stop
   if (!MUS.timer) MUS.timer = setInterval(musicWatch, 400);
 }
 function stopMusic() {
@@ -2032,7 +2049,7 @@ window.addEventListener('resize', () => { if (!$('game').hidden && lv) layout();
 document.addEventListener('visibilitychange', () => { if (!AC) return; if (document.visibilityState !== 'visible') AC.suspend().catch(() => {}); else AC.resume().catch(() => {}); });
 
 // debug hooks for automated checks
-window.__probka = { LEVELS, mus: () => ({ want: MUS.want, idx: MUS.idx, playing: !!MUS.cur, t: AC && +AC.currentTime.toFixed(1), endAt: +MUS.endAt.toFixed(1), bufs: [...MUS.buf.keys()] }), skipNear: () => { MUS.endAt = AC.currentTime + 3.2; }, get st() { return st; }, get drag() { return drag; }, get G() { return G; }, get ended() { return ended; }, setTime: t => { timeLeft = t; started = true; }, startLevel, L, save: () => save, solveNow: () => L.solve(st, 4000), passGate, vis: () => vis };
+window.__probka = { LEVELS, mus: () => ({ order: MORDER.list.join(''), want: MUS.want, idx: MUS.idx, playing: !!MUS.cur, t: AC && +AC.currentTime.toFixed(1), endAt: +MUS.endAt.toFixed(1), bufs: [...MUS.buf.keys()] }), skipNear: () => { MUS.endAt = AC.currentTime + 3.2; }, get st() { return st; }, get drag() { return drag; }, get G() { return G; }, get ended() { return ended; }, setTime: t => { timeLeft = t; started = true; }, startLevel, L, save: () => save, solveNow: () => L.solve(st, 4000), passGate, vis: () => vis };
 
 applyTheme();
 showMap();
