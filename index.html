@@ -735,99 +735,68 @@ const sfx = {
 };
 const buzz = ms => { if (save.vib && navigator.vibrate) try { navigator.vibrate(ms); } catch (e) {} };
 
-// ---------- music: public-domain tunes on a tiny synth ----------
-const NOTE = n => { const m = n.match(/^([A-G])(#?)(\d)$/); const st = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }[m[1]] + (m[2] ? 1 : 0); return 440 * Math.pow(2, (st + (+m[3] - 4) * 12 - 9) / 12); };
-function track(bpm, unit, wave, text) {
-  const ev = []; let t = 0;
-  for (const tok of text.trim().split(/\s+/)) {
-    const [n, l] = tok.split(':'); const len = (+l || 1) * unit;
-    if (n !== 'r') ev.push([t, NOTE(n), len]);
-    t += len;
-  }
-  return { bpm, wave, ev, len: t };
+// ---------- music: the game's own recordings ----------
+// Tracks play one after another with a short crossfade. Only the playing track
+// and the next one are kept decoded, so memory stays small.
+const MUSIC = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => 'music/t' + n + '.mp3');
+const MUS = { want: false, idx: -1, gen: 0, gain: null, cur: null, endAt: 0, buf: new Map(), loading: new Map(), timer: 0, urgent: false };
+const MUSIC_VOL = 0.5, XFADE = 2.5;
+function loadTrack(i) {
+  if (MUS.buf.has(i)) return Promise.resolve(MUS.buf.get(i));
+  if (MUS.loading.has(i)) return MUS.loading.get(i);
+  const a = ctxAudio(); if (!a) return Promise.reject(new Error('no audio'));
+  const p = fetch(MUSIC[i]).then(r => { if (!r.ok) throw new Error('missing'); return r.arrayBuffer(); })
+    .then(ab => new Promise((res, rej) => a.decodeAudioData(ab, res, rej)))
+    .then(buf => {
+      MUS.loading.delete(i); MUS.buf.set(i, buf);
+      for (const k of [...MUS.buf.keys()]) if (MUS.buf.size > 2 && k !== i && k !== MUS.idx) MUS.buf.delete(k);
+      return buf;
+    }, e => { MUS.loading.delete(i); throw e; });
+  MUS.loading.set(i, p);
+  return p;
 }
-const ENT1 = 'D4 D#4 E4 C5:2 E4 C5:2 E4 C5:7 C5 D5 D#5 E5 C5 D5 E5:2 B4 D5:2 C5:6 r:2';
-const ENT2 = 'D4 D#4 E4 C5:2 E4 C5:2 E4 C5:7 A4 G4 F#4 A4 C5 E5:2 D5 C5 A4 D5:6 r:2';
-const TRACKS = [
-  track(140, 2, 'square', 'E5:2 B4 C5 D5:2 C5 B4 A4:2 A4 C5 E5:2 D5 C5 B4:3 C5 D5:2 E5:2 C5:2 A4:2 A4:2 r:2 r D5:2 F5 A5:2 G5 F5 E5:3 C5 E5:2 D5 C5 B4:2 B4 C5 D5:2 E5:2 C5:2 A4:2 A4:2 r:2'),
-  track(92, 1, 'triangle', [ENT1, ENT2, ENT1, ENT1].join(' ')),
-  track(120, 1, 'triangle', 'B4 A4 G#4 A4 C5:4 D5 C5 B4 C5 E5:4 F5 E5 D#5 E5 B5 A5 G#5 A5 B5 A5 G#5 A5 C6:8 A5:2 C6:2 B5:2 A5:2 G5:2 A5:2 B5:2 A5:2 G5:2 A5:2 B5:2 A5:2 G5:2 F#5:2 E5:4'),
-  track(116, 2, 'triangle', 'E5:2 E5:2 F5:2 G5:2 G5:2 F5:2 E5:2 D5:2 C5:2 C5:2 D5:2 E5:2 E5:3 D5 D5:4 E5:2 E5:2 F5:2 G5:2 G5:2 F5:2 E5:2 D5:2 C5:2 C5:2 D5:2 E5:2 D5:3 C5 C5:4'),
-  track(150, 2, 'square', 'A4 B4 C5 D5 E5 C5 E5:2 D#5 B4 D#5:2 D5 A#4 D5:2 A4 B4 C5 D5 E5 C5 E5 A5 G5 E5 C5 E5 G5:4 A4 B4 C5 D5 E5 C5 E5:2 D#5 B4 D#5:2 D5 A#4 D5:2 A4 B4 C5 D5 E5 C5 E5 A5 G5 E5 C5 E5 A5:4'),
-  track(128, 2, 'triangle', 'G4:2 r D4 G4:2 r D4 G4 D4 G4 B4 D5:4 C5:2 r A4 C5:2 r A4 C5 A4 F#4 A4 D4:4 G4:2 G4:2 B4 A4 G4 G4 G4 F#4 F#4:2 A4 C5 F#4 A4 G4:4 r:4'),
-  track(132, 2, 'sine', 'E5 D#5 E5 D#5 E5 B4 D5 C5 A4:3 C4 E4 A4 B4:3 E4 G#4 B4 C5:3 E4 E5 D#5 E5 D#5 E5 B4 D5 C5 A4:3 C4 E4 A4 B4:3 E4 C5 B4 A4:4 r:2'),
-  track(120, 2, 'triangle', 'D5:2 G4 A4 B4 C5 D5:2 G4:2 G4:2 E5:2 C5 D5 E5 F#5 G5:2 G4:2 G4:2 C5:2 D5 C5 B4 A4 B4:2 C5 B4 A4 G4 F#4:2 G4 A4 B4 G4 A4:6'),
-];
-const MUS = { song: null, idx: -1, step: 0, next: 0, timer: 0, gain: null, urgent: false };
+function playTrack(i, gen, fadeIn) {
+  loadTrack(i).then(buf => {
+    if (gen !== MUS.gen || !MUS.want) return;
+    const a = AC, t = a.currentTime + 0.05;
+    const src = a.createBufferSource(), g = a.createGain();
+    src.buffer = buf;
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(1, t + fadeIn);
+    src.connect(g).connect(MUS.gain);
+    src.start(t);
+    const old = MUS.cur;
+    if (old) { try { old.g.gain.cancelScheduledValues(t); old.g.gain.setValueAtTime(old.g.gain.value || 1, t); old.g.gain.linearRampToValueAtTime(0.0001, t + XFADE); old.src.stop(t + XFADE + 0.1); } catch (e) {} }
+    MUS.cur = { src, g }; MUS.idx = i; MUS.endAt = t + buf.duration;
+    setTimeout(() => { if (gen === MUS.gen) loadTrack((i + 1) % MUSIC.length).catch(() => {}); }, 4000);
+  }).catch(() => {
+    // no file (offline before it was saved): try the next one a bit later
+    if (gen === MUS.gen && MUS.want) setTimeout(() => { if (gen === MUS.gen && MUS.want) playTrack((i + 1) % MUSIC.length, gen, 1); }, 3000);
+  });
+}
+function musicWatch() {
+  if (!MUS.want || !MUS.cur || !AC) return;
+  // the context's own clock stops while the game is in the background, so this stays in step
+  if (AC.currentTime > MUS.endAt - XFADE - 0.3 && !MUS.next) {
+    MUS.next = true;
+    playTrack((MUS.idx + 1) % MUSIC.length, MUS.gen, 0.05);
+    setTimeout(() => { MUS.next = false; }, (XFADE + 1) * 1000);
+  }
+}
 function startMusic(idx) {
-  stopMusic();
   if (!save.music) return;
+  if (MUS.want && MUS.cur) return;          // already playing: keep going between levels
   const a = ctxAudio(); if (!a) return;
-  if (!MUS.gain) { MUS.gain = a.createGain(); MUS.gain.connect(OUT); }
-  MUS.gain.gain.setValueAtTime(0.55, a.currentTime);
-  MUS.idx = idx % TRACKS.length; MUS.song = TRACKS[MUS.idx]; MUS.step = 0; MUS.next = a.currentTime + 0.15;
-  MUS.timer = setInterval(musicTick, 50);
+  if (!MUS.gain) { MUS.gain = a.createGain(); MUS.gain.connect(a.destination); }   // recordings skip the sound-effect filter
+  MUS.gain.gain.setValueAtTime(MUSIC_VOL, a.currentTime);
+  MUS.want = true; MUS.gen++; MUS.next = false;
+  playTrack(((idx % MUSIC.length) + MUSIC.length) % MUSIC.length, MUS.gen, 1.2);
+  if (!MUS.timer) MUS.timer = setInterval(musicWatch, 400);
 }
-function stopMusic() { if (MUS.timer) clearInterval(MUS.timer); MUS.timer = 0; MUS.song = null; }
-function mnote(freq, t, dur, type, vol) {
-  const a = AC, o = a.createOscillator(), gn = a.createGain();
-  o.type = type; o.frequency.setValueAtTime(freq, t);
-  gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + 0.012); gn.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  o.connect(gn).connect(MUS.gain); o.start(t); o.stop(t + dur + 0.03);
-}
-function hat(t, vol) {
-  const a = AC, s = a.createBufferSource(), f = a.createBiquadFilter(), gn = a.createGain();
-  s.buffer = NOISE; f.type = 'highpass'; f.frequency.value = 7000;
-  gn.gain.setValueAtTime(vol, t); gn.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
-  s.connect(f).connect(gn).connect(MUS.gain); s.start(t, Math.random() * 0.5); s.stop(t + 0.06);
-}
-function kick(t, vol) {
-  const a = AC, o = a.createOscillator(), gn = a.createGain();
-  o.frequency.setValueAtTime(130, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
-  gn.gain.setValueAtTime(vol, t); gn.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
-  o.connect(gn).connect(MUS.gain); o.start(t); o.stop(t + 0.18);
-}
-const WAVEVOL = { triangle: 0.05, sine: 0.06, square: 0.018, sawtooth: 0.02 };
-const PASSES = 4;
-function musicTick() {
-  const a = AC; if (!a || !MUS.song) return;
-  while (MUS.next < a.currentTime + 0.3) {
-    const song = MUS.song, urgent = MUS.urgent;
-    const pass = Math.floor(MUS.step / song.len), s = MUS.step % song.len, t = MUS.next;
-    const six = 60 / song.bpm / 4 * (urgent ? 0.8 : 1);
-    const v = urgent ? 3 : pass % PASSES;
-    const key = v === 3 ? Math.pow(2, 2 / 12) : 1;
-    let first = null;
-    for (const [at, f0, len] of song.ev) {
-      const f = f0 * key;
-      if (at === s) {
-        const dur = Math.max(0.09, len * six * 0.92);
-        if (v === 2) { mnote(f * 2, t, Math.min(dur, 0.35), 'sine', 0.045); mnote(f * 4, t, 0.08, 'sine', 0.008); }
-        else { mnote(f, t, dur, song.wave, WAVEVOL[song.wave]); mnote(f * 2, t, Math.min(0.18, len * six * 0.5), 'sine', 0.01); }
-        if (v >= 1) mnote(f * Math.pow(2, -4 / 12), t, dur * 0.9, 'triangle', 0.022);
-      }
-      if (first === null && at >= s - (s % 8) && at < s - (s % 8) + 8) first = f;
-    }
-    if (first) {
-      if (v === 0) {
-        if (s % 8 === 0) mnote(first / 4, t, six * 3, 'sine', 0.06);
-        if (s % 8 === 4) [1, 1.26, 1.5].forEach(r => mnote(first / 2 * r, t, six * 1.4, 'triangle', 0.01));
-      } else if (v === 2) {
-        if (s % 2 === 0) mnote(first / 2 * [1, 1.26, 1.5, 2][(s / 2) % 4], t, six * 1.8, 'triangle', 0.02);
-        if (s % 8 === 0) mnote(first / 4, t, six * 6, 'sine', 0.05);
-      } else {
-        if (s % 4 === 0) mnote(first / 4 * [1, 1.5, 1.68, 1.5][(s / 4) % 4], t, six * 3.4, 'sine', 0.065);
-        if (s % 8 === 4) [1, 1.26, 1.5].forEach(r => mnote(first / 2 * r, t, six * 1.2, 'triangle', 0.012));
-      }
-    }
-    if (v >= 1) {
-      if (s % 8 === 0) kick(t, 0.1);
-      if (s % 2 === 0) hat(t, s % 4 === 2 ? 0.035 : 0.018);
-      if (v === 3 && s % 8 === 4) kick(t, 0.06);
-    }
-    MUS.next += six; MUS.step++;
-    if (MUS.step >= song.len * PASSES) { MUS.idx = (MUS.idx + 1) % TRACKS.length; MUS.song = TRACKS[MUS.idx]; MUS.step = 0; }
-  }
+function stopMusic() {
+  MUS.want = false; MUS.gen++;
+  if (MUS.timer) { clearInterval(MUS.timer); MUS.timer = 0; }
+  const c = MUS.cur; MUS.cur = null;
+  if (c && AC) { const t = AC.currentTime; try { c.g.gain.cancelScheduledValues(t); c.g.gain.setValueAtTime(c.g.gain.value || 1, t); c.g.gain.linearRampToValueAtTime(0.0001, t + 0.5); c.src.stop(t + 0.6); } catch (e) {} }
 }
 
 // ---------- toast ----------
@@ -2060,10 +2029,10 @@ function drawFinger(x, now) {
 }
 
 window.addEventListener('resize', () => { if (!$('game').hidden && lv) layout(); else if (!$('map').hidden) buildMap(); });
-document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible') { stopMusic(); } else if (!$('game').hidden && lv && !ended) startMusic(LI); });
+document.addEventListener('visibilitychange', () => { if (!AC) return; if (document.visibilityState !== 'visible') AC.suspend().catch(() => {}); else AC.resume().catch(() => {}); });
 
 // debug hooks for automated checks
-window.__probka = { LEVELS, get st() { return st; }, get drag() { return drag; }, get G() { return G; }, get ended() { return ended; }, setTime: t => { timeLeft = t; started = true; }, startLevel, L, save: () => save, solveNow: () => L.solve(st, 4000), passGate, vis: () => vis };
+window.__probka = { LEVELS, mus: () => ({ want: MUS.want, idx: MUS.idx, playing: !!MUS.cur, t: AC && +AC.currentTime.toFixed(1), endAt: +MUS.endAt.toFixed(1), bufs: [...MUS.buf.keys()] }), skipNear: () => { MUS.endAt = AC.currentTime + 3.2; }, get st() { return st; }, get drag() { return drag; }, get G() { return G; }, get ended() { return ended; }, setTime: t => { timeLeft = t; started = true; }, startLevel, L, save: () => save, solveNow: () => L.solve(st, 4000), passGate, vis: () => vis };
 
 applyTheme();
 showMap();
