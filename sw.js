@@ -1,7 +1,7 @@
 // Network first for the page itself, so an update shows up on the next launch
 // with internet; everything falls back to the cached copy when offline.
 // Music lives in its own cache that survives updates, so it downloads once.
-const CACHE = 'tyanuchki-v7';
+const CACHE = 'tyanuchki-v8';
 const MUSIC_CACHE = 'tyanuchki-music-1';
 const FILES = ['./', 'index.html', 'manifest.webmanifest', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png'];
 const MUSIC = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => 'music/t' + n + '.mp3');
