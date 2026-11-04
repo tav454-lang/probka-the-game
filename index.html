@@ -1348,97 +1348,123 @@ function updateTools() {
   }
 }
 
-// ---------- geometry of moving blocks ----------
-function occFor(bi) { return L.occGrid(st, bi); }
-// may block b sit at a fractional spot? Cells outside the board are allowed
-// only inside the opening of a gate of the block's colour that it fits through.
-function fitsF(bi, px, py, occ) {
-  const b = st.blocks[bi], bb = L.bbox(b.cells), e = 1e-6;
-  for (const [dx, dy] of b.cells) {
-    const x0 = px + dx, y0 = py + dy;
-    const ca = Math.floor(x0 + e), cb = Math.ceil(x0 + 1 - e) - 1, ra = Math.floor(y0 + e), rb = Math.ceil(y0 + 1 - e) - 1;
-    for (let cy = ra; cy <= rb; cy++) for (let cx = ca; cx <= cb; cx++) {
-      if (cx >= 0 && cy >= 0 && cx < st.w && cy < st.h) { if (occ[cy * st.w + cx] !== -1) return false; continue; }
-      if (!outsideOK(b, bb, px, py, cx, cy)) return false;
+// ---------- dragging ----------
+// A grabbed block moves along a track: the grid of spots it can reach, joined
+// by unit segments, plus a short tail out through every gate it may leave by.
+// The finger's position is projected onto the track, and the block slides
+// along the track towards it, so it rounds corners and squeezes past
+// neighbours on its own and never sticks halfway between cells.
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function buildTrack(bi) {
+  const b = st.blocks[bi], w = st.w, occ = L.occGrid(st, bi);
+  const r = L.reachFast(st, bi, occ), bb = L.bbox(b.cells);
+  const nodes = r.list.map(p => [p % w, (p / w) | 0]);
+  const idx = new Map(); r.list.forEach((p, k) => idx.set(p, k));
+  const segs = [], adj = nodes.map(() => []), segOf = new Map();
+  nodes.forEach(([x, y], k) => {
+    for (const d of [1, 2]) {
+      if (!L.canMoveAxis(b, d)) continue;
+      const nx = x + L.DIRS[d][0], ny = y + L.DIRS[d][1];
+      if (nx >= w || ny >= st.h) continue;
+      const j = idx.get(ny * w + nx); if (j === undefined) continue;
+      segOf.set(k * 4096 + j, segs.length); segOf.set(j * 4096 + k, segs.length);
+      segs.push({ a: k, b: j, ax: x, ay: y, bx: nx, by: ny, len: 1, gate: -1 });
+      adj[k].push(j); adj[j].push(k);
     }
-  }
-  return true;
+    st.gates.forEach((g, gi) => {
+      if (!L.gateOpen(st, occ, b, x, y, g)) return;
+      const [ex, ey] = L.edgePos(st, b, x, y, g);
+      if (ex !== x || ey !== y) return;
+      const d = L.DIRS[g.side], len = (g.side === 0 || g.side === 2 ? bb.h : bb.w) + 0.6;
+      segs.push({ a: k, b: -1, ax: x, ay: y, bx: x + d[0] * len, by: y + d[1] * len, len, gate: gi });
+    });
+  });
+  return { nodes, idx, segs, adj, segOf };
 }
-function outsideOK(b, bb, px, py, cx, cy) {
-  const e = 1e-6;
-  for (const g of st.gates) {
-    if (g.c !== b.c || !L.canMoveAxis(b, g.side)) continue;
-    if (g.side === 0 || g.side === 2) {
-      if (g.side === 0 ? cy >= 0 : cy < st.h) continue;
-      if (cx < g.at || cx >= g.at + g.len) continue;
-      if (px + bb.x0 < g.at - e || px + bb.x1 + 1 > g.at + g.len + e) continue;
-      return true;
-    } else {
-      if (g.side === 3 ? cx >= 0 : cx < st.w) continue;
-      if (cy < g.at || cy >= g.at + g.len) continue;
-      if (py + bb.y0 < g.at - e || py + bb.y1 + 1 > g.at + g.len + e) continue;
-      return true;
+function segPt(tr, p) { const g = tr.segs[p.s], f = p.t / g.len; return [g.ax + (g.bx - g.ax) * f, g.ay + (g.by - g.ay) * f]; }
+function seedsOf(tr, p) { const g = tr.segs[p.s]; return g.b >= 0 ? [[g.a, p.t], [g.b, g.len - p.t]] : [[g.a, p.t]]; }
+// distances along the track from a point to every spot
+function dists(tr, seeds) {
+  const n = tr.nodes.length, D = new Float64Array(n).fill(1e9), done = new Uint8Array(n);
+  for (const [k, d] of seeds) if (d < D[k]) D[k] = d;
+  for (;;) {
+    let u = -1;
+    for (let k = 0; k < n; k++) if (!done[k] && D[k] < 1e9 && (u < 0 || D[k] < D[u])) u = k;
+    if (u < 0) break;
+    done[u] = 1;
+    for (const v of tr.adj[u]) if (D[u] + 1 < D[v]) D[v] = D[u] + 1;
+  }
+  return D;
+}
+// nearest point of the track to (px, py); far-away parts of the track cost a little extra
+function project(tr, px, py, from) {
+  let best = null;
+  tr.segs.forEach((g, s) => {
+    const dx = (g.bx - g.ax) / g.len, dy = (g.by - g.ay) / g.len;
+    const t = clamp((px - g.ax) * dx + (py - g.ay) * dy, 0, g.len);
+    const d = Math.hypot(px - g.ax - dx * t, py - g.ay - dy * t);
+    const gd = Math.min(from[g.a], g.b >= 0 ? from[g.b] : 1e9);
+    const sc = d + 0.08 * gd + (g.gate >= 0 ? -0.08 : 0);   // gates pull a little
+    if (!best || sc < best.sc) best = { s, t, d, sc };
+  });
+  return best;
+}
+function nodeSeg(tr, k) {
+  for (let s = 0; s < tr.segs.length; s++) { const g = tr.segs[s]; if (g.a === k) return { s, t: 0 }; if (g.b === k) return { s, t: g.len }; }
+  return null;
+}
+function setGoal(m, p) { m.goal = p; m.D = dists(m.tr, seedsOf(m.tr, p)); }
+// slide m.cur towards m.goal along the track by up to maxD cells; returns spots crossed
+function travel(m, maxD) {
+  const tr = m.tr; let guard = 0, crossed = 0;
+  while (maxD > 1e-6 && guard++ < 60) {
+    const c = m.cur, g = tr.segs[c.s];
+    if (c.s === m.goal.s) {
+      const dt = m.goal.t - c.t;
+      if (Math.abs(dt) <= maxD) { c.t = m.goal.t; return crossed; }
+      c.t += Math.sign(dt) * maxD; return crossed;
     }
+    const ca = c.t + m.D[g.a], cb = g.b >= 0 ? g.len - c.t + m.D[g.b] : 1e9;
+    const toB = cb < ca, rem = toB ? g.len - c.t : c.t;
+    if (rem > maxD) { c.t += toB ? maxD : -maxD; return crossed; }
+    maxD -= rem; crossed++;
+    const node = toB ? g.b : g.a, gs = tr.segs[m.goal.s];
+    if (gs.a === node || gs.b === node) { m.cur = { s: m.goal.s, t: gs.a === node ? 0 : gs.len }; continue; }
+    let nxt = -1;
+    for (const v of tr.adj[node]) if (m.D[v] < m.D[node] - 0.5 && (nxt < 0 || m.D[v] < m.D[nxt])) nxt = v;
+    if (nxt < 0) { m.cur = { s: c.s, t: toB ? g.len : 0 }; return crossed; }
+    const si = tr.segOf.get(node * 4096 + nxt);
+    m.cur = { s: si, t: tr.segs[si].a === node ? 0 : 1 };
+  }
+  return crossed;
+}
+const atGoal = m => m.cur.s === m.goal.s && Math.abs(m.cur.t - m.goal.t) < 1e-6;
+// advance a mover one frame; returns true when it has arrived
+function stepMover(k, m, dt) {
+  const v = vis[k];
+  const [cx, cy] = segPt(m.tr, m.cur), [gx, gy] = segPt(m.tr, m.goal);
+  const rem = Math.hypot(gx - cx, gy - cy);
+  const crossed = travel(m, dt * (14 + 26 * rem));
+  if (crossed) sfx.step();
+  [v.x, v.y] = segPt(m.tr, m.cur);
+  const g = m.tr.segs[m.cur.s];
+  if (g.gate >= 0 && m.cur.t >= 0.3) {   // far enough into the gate: it goes through
+    if (drag && drag.bi === k) { try { cv.releasePointerCapture(drag.pid); } catch (er) {} drag = null; }
+    v.mover = null;
+    passGate(k, g.gate, g.ax, g.ay);
+    return true;
+  }
+  if (!drag || drag.bi !== k) {
+    if (atGoal(m)) { v.mover = null; v.x = st.blocks[k].x; v.y = st.blocks[k].y; sfx.drop(); return true; }
   }
   return false;
 }
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-function integrate(bi, tx, ty) {
-  const v = vis[bi], b = st.blocks[bi], occ = drag.occ, STEP = 0.1;
-  if (b.ax === 1) ty = v.y; if (b.ax === 2) tx = v.x;
-  const cx0 = Math.round(v.x), cy0 = Math.round(v.y);
-  let blocked = false;
-  for (let k = 0; k < 80; k++) {
-    const dx = tx - v.x, dy = ty - v.y;
-    if (Math.abs(dx) < 1e-3 && Math.abs(dy) < 1e-3) break;
-    let moved = false;
-    // move along the larger direction first so corners feel natural
-    const order = Math.abs(dx) >= Math.abs(dy) ? [0, 1] : [1, 0];
-    for (const axis of order) {
-      const d = axis === 0 ? dx : dy;
-      if (Math.abs(d) < 1e-4) continue;
-      const sd = clamp(d, -STEP, STEP);
-      const nx = axis === 0 ? v.x + sd : v.x, ny = axis === 0 ? v.y : v.y + sd;
-      if (fitsF(bi, nx, ny, occ)) { v.x = nx; v.y = ny; moved = true; continue; }
-      // stop exactly at the cell boundary
-      const cur = axis === 0 ? v.x : v.y;
-      const lim = sd > 0 ? Math.floor(cur + sd + 1e-9) : Math.ceil(cur + sd - 1e-9);
-      if (lim !== cur && Math.abs(lim - cur) <= Math.abs(sd) + 1e-9 && fitsF(bi, axis === 0 ? lim : v.x, axis === 0 ? v.y : lim, occ)) {
-        if (axis === 0) v.x = lim; else v.y = lim; moved = true; continue;
-      }
-      blocked = true;
-      // corner help: slide the other coordinate onto the grid line
-      const oth = axis === 0 ? v.y : v.x, ro = Math.round(oth);
-      if (Math.abs(oth - ro) > 1e-4 && Math.abs(oth - ro) < 0.5) {
-        const no = oth + clamp(ro - oth, -STEP, STEP);
-        if (fitsF(bi, axis === 0 ? v.x : no, axis === 0 ? no : v.y, occ)) { if (axis === 0) v.y = no; else v.x = no; moved = true; }
-      }
-    }
-    if (!moved) break;
-  }
-  if (blocked && Math.hypot(tx - v.x, ty - v.y) > 0.35) sfx.bump();
-  if (Math.round(v.x) !== cx0 || Math.round(v.y) !== cy0) sfx.step();
-  checkExit(bi);
-}
-function checkExit(bi) {
-  const v = vis[bi], b = st.blocks[bi], bb = L.bbox(b.cells), T = 0.3;
-  let side = -1;
-  if (v.y + bb.y0 < -T) side = 0;
-  else if (v.y + bb.y1 + 1 > st.h + T) side = 2;
-  else if (v.x + bb.x0 < -T) side = 3;
-  else if (v.x + bb.x1 + 1 > st.w + T) side = 1;
-  if (side < 0) return;
-  const gi = st.gates.findIndex(g => g.side === side && g.c === b.c && ((side === 0 || side === 2)
-    ? Math.round(v.x) + bb.x0 >= g.at && Math.round(v.x) + bb.x1 < g.at + g.len
-    : Math.round(v.y) + bb.y0 >= g.at && Math.round(v.y) + bb.y1 < g.at + g.len));
-  if (gi < 0) return;
-  // grab ends: the gate pulls the block through
-  endDrag(false);
-  const g = st.gates[gi];
-  let ex = Math.round(v.x), ey = Math.round(v.y);
-  if (side === 0 || side === 2) [ex, ey] = L.edgePos(st, b, ex, 0, g); else [ex, ey] = L.edgePos(st, b, 0, ey, g);
-  if (side === 0 || side === 2) ex = Math.round(v.x); else ey = Math.round(v.y);
-  passGate(bi, gi, ex, ey);
+function finishMover(k) {
+  const v = vis[k], m = v.mover; if (!m) return;
+  const g = m.tr.segs[m.goal.s];
+  v.mover = null;
+  if (g.gate >= 0) { passGate(k, g.gate, g.ax, g.ay); return; }
+  v.x = st.blocks[k].x; v.y = st.blocks[k].y;
 }
 // block bi passes gate gi (from integer spot ex, ey)
 function passGate(bi, gi, ex, ey) {
@@ -1519,33 +1545,56 @@ cv.addEventListener('pointerdown', e => {
   const [px, py] = boardPt(e);
   const bi = blockAt(px, py);
   if (aim) { useAim(bi); return; }
-  if (bi < 0) return;
+  if (bi < 0 || drag) return;
   const b = st.blocks[bi], v = vis[bi];
   if (b.ice > 0) { v.shake = performance.now(); sfx.crack(); toast(`Блок во льду: выведи ещё ${b.ice} ${plural(b.ice, 'блок', 'блока', 'блоков')}`); return; }
+  if (v.mover) finishMover(bi);
+  if (b.out) return;
   if (v.anim && v.anim.t === 'snap') { v.x = v.anim.tx; v.y = v.anim.ty; v.anim = null; }
-  drag = { bi, pid: e.pointerId, sx: px, sy: py, ox: v.x, oy: v.y, occ: occFor(bi) };
-  try { cv.setPointerCapture(e.pointerId); } catch (er) {}
-  if (timeTotal) startTimer();
   started = true;
   hintShow = null; idleAt = performance.now();
+  const tr = buildTrack(bi);
+  const cur = nodeSeg(tr, tr.idx.get(b.y * st.w + b.x));
+  if (!cur) { v.shake = performance.now(); sfx.bump(); return; }   // boxed in
+  const m = { tr, cur, goal: null, D: null };
+  setGoal(m, { s: cur.s, t: cur.t });
+  drag = { bi, pid: e.pointerId, sx: px, sy: py, ox: b.x, oy: b.y, m, far: false };
+  try { cv.setPointerCapture(e.pointerId); } catch (er) {}
   sfx.grab();
   e.preventDefault();
 });
 cv.addEventListener('pointermove', e => {
   if (!drag || e.pointerId !== drag.pid) return;
   const [px, py] = boardPt(e);
-  integrate(drag.bi, drag.ox + px - drag.sx, drag.oy + py - drag.sy);
+  const m = drag.m;
+  const p = project(m.tr, drag.ox + px - drag.sx, drag.oy + py - drag.sy, dists(m.tr, seedsOf(m.tr, m.cur)));
+  setGoal(m, { s: p.s, t: p.t });
+  const far = p.d > 0.75;
+  if (far && !drag.far) sfx.bump();
+  drag.far = far;
 });
-function endDrag(snapSound = true) {
+function endDrag() {
   if (!drag) return;
-  const bi = drag.bi, v = vis[bi], b = st.blocks[bi];
+  const bi = drag.bi, v = vis[bi], b = st.blocks[bi], m = drag.m, tr = m.tr;
   try { cv.releasePointerCapture(drag.pid); } catch (er) {}
   drag = null;
   if (b.out) return;
-  const tx = Math.round(v.x), ty = Math.round(v.y);
-  b.x = tx; b.y = ty;
-  v.anim = { t: 'snap', fx: v.x, fy: v.y, tx, ty, t0: performance.now(), d: 110 };
-  if (snapSound) sfx.drop();
+  const gs = tr.segs[m.goal.s], cs = tr.segs[m.cur.s];
+  // pushed into a gate: let it go through
+  if (gs.gate >= 0 && m.goal.t >= 0.12) setGoal(m, { s: m.goal.s, t: gs.len });
+  else if (cs.gate >= 0 && m.cur.t >= 0.05 && m.goal.s === m.cur.s) setGoal(m, { s: m.cur.s, t: cs.len });
+  if (tr.segs[m.goal.s].gate >= 0 && m.goal.t > 0.2) {
+    const g = tr.segs[m.goal.s];
+    b.x = g.ax; b.y = g.ay;     // the spot by the gate; it leaves from there
+  } else {
+    // settle on the nearest spot
+    const k = gs.b < 0 || m.goal.t < gs.len / 2 ? gs.a : gs.b;
+    const p = nodeSeg(tr, k);
+    const s = gs.a === k ? { s: m.goal.s, t: 0 } : gs.b === k ? { s: m.goal.s, t: gs.len } : p;
+    setGoal(m, s);
+    [b.x, b.y] = tr.nodes[k];
+  }
+  v.mover = m;
 }
 cv.addEventListener('pointerup', e => { if (drag && e.pointerId === drag.pid) endDrag(); });
 cv.addEventListener('pointercancel', e => { if (drag && e.pointerId === drag.pid) endDrag(); });
@@ -1579,6 +1628,8 @@ $('t-hammer').addEventListener('click', () => toggleAim('hammer'));
 $('t-vacuum').addEventListener('click', () => toggleAim('vacuum'));
 function removeBlock(k, how) {
   const b = st.blocks[k], v = vis[k];
+  v.mover = null;
+  if (drag && drag.bi === k) { try { cv.releasePointerCapture(drag.pid); } catch (er) {} drag = null; }
   const before = st.blocks.map(o => o.ice);
   const now = performance.now();
   if (b.c2 >= 0) {
@@ -1720,6 +1771,9 @@ function frame(now) {
   if (winAt && now >= winAt && !ended) { winAt = 0; win(); }
   // tutorial help on the first levels: show the way after a pause
   if (LI < 3 && !started && !ended && !paused && !hintShow && !autoHintDone && now - idleAt > (LI === 0 ? 1500 : 6000)) { autoHintDone = true; showHint(true); }
+  // dragged and settling blocks
+  if (drag && !ended) stepMover(drag.bi, drag.m, dt);
+  vis.forEach((v, k) => { if (v.mover && (!drag || drag.bi !== k)) stepMover(k, v.mover, dt); });
   // animations
   vis.forEach((v, k) => {
     const a = v.anim; if (!a) return;
